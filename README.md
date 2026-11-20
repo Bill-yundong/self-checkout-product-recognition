@@ -1,204 +1,147 @@
 # Real-Time Retail Product Recognition for Self-Checkout
 
-COSC-4117EL Assignment 3: real-time webcam classification of six retail products using ResNet18 transfer learning, with an optional YOLOv8 comparison for the bonus requirement.
+COSC-4117EL-01 Artificial Intelligence, Fall 2026, Assignment 3, Group 6
+(Qingdong Wu, Yuhang Zhao)
+
+This project classifies six retail products in real time from a webcam feed. It uses ResNet18 transfer learning and is built on the course sample code (`CNN_ResNet_Sample.py`). For the bonus part, it also compares ResNet18 against YOLOv8n-cls.
 
 ## Product classes
 
-1. `bottled_water`
-2. `cola_can`
-3. `juice_box`
-4. `chips_bag`
-5. `milk_bottle`
-6. `instant_noodle_cup`
+Classes are listed in alphabetical order, which is the order the model uses:
 
-## Merged code files
+| ID | Class |
+|---|---|
+| 0 | `bottled_water` |
+| 1 | `chips_bag` |
+| 2 | `cola_can` |
+| 3 | `instant_noodle_cup` |
+| 4 | `juice_box` |
+| 5 | `milk_bottle` |
 
-The submission workflow uses two root-level Python files:
+## Files
 
 | File | Purpose |
 |---|---|
-| `COSC_4117EL_A3_G6_setup.py` | Builds the environment, installs dependencies, creates dataset folders, and generates the YOLO configuration file. |
-| `COSC_4117EL_A3_G6_main.py` | Contains all assignment functionality: webcam collection, ResNet18 training, evaluation, real-time inference, YOLO training/detection, and model comparison. |
+| `COSC_4117EL_A3_G6-setup.py` | Installs dependencies and creates `dataset/<split>/<class>/` and `outputs/`. |
+| `COSC_4117EL_A3_G6-main.py` | Handles data collection, ResNet18 training and evaluation, the real-time demo, and the YOLO bonus comparison. |
 
-The environment-verification script and PDF-report generator are auxiliary files and are not merged into the two main code files.
+The comments in `-main.py` tag each part as `[SAMPLE]` (kept from the course sample), `[MODIFIED]` (changed from the sample, with the reason) or `[NEW]` (added by the group).
 
-## 1. Optional virtual environment
+Only the two `.py` files and the PDF report are submitted. Do not upload a ZIP file.
 
-Open a terminal in this project folder and run:
+## 1. Set up the environment
 
-```powershell
+You can optionally create a virtual environment first:
+
+```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 ```
 
-If PowerShell blocks the virtual environment activation script, run:
+Then run the setup script:
 
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```bash
+python COSC_4117EL_A3_G6-setup.py                 # install packages and create folders
+python COSC_4117EL_A3_G6-setup.py --skip-install  # create folders only
+python COSC_4117EL_A3_G6-setup.py --skip-yolo     # skip the bonus YOLO package
 ```
 
-## 2. Build the environment and project folders
+## 2. Collect webcam images
 
-Run the setup script:
-
-```powershell
-python COSC_4117EL_A3_G6_setup.py
+```bash
+python COSC_4117EL_A3_G6-main.py collect --class-name cola_can --split train --num 50
 ```
 
-This script installs the required packages, creates the ResNet and YOLO folder structures, and writes `yolo_dataset/data.yaml`.
+Repeat this command for all 6 classes and all 3 splits (`train`, `val`, `test`). Recommended number of images per class:
 
-Useful options:
+- train: 40 to 60
+- val: 10 to 15
+- test: 10 to 15
 
-```powershell
-# Create folders and configuration without installing packages
-python COSC_4117EL_A3_G6_setup.py --skip-install
+While collecting, place the product inside the green box. Only that region is saved, and the live demo classifies the same region.
 
-# Skip the optional YOLO dependency and configuration
-python COSC_4117EL_A3_G6_setup.py --skip-yolo
+Keys:
+
+- `c`: capture one image
+- `a`: toggle automatic capture (one image every 1.2 s)
+- `q`: quit
+
+Tips:
+
+- Vary the angle, distance, lighting and background.
+- Collect each split in a separate session, because neighbouring frames are nearly identical and would leak between train and test.
+
+## 3. Train ResNet18
+
+```bash
+python COSC_4117EL_A3_G6-main.py train
+python COSC_4117EL_A3_G6-main.py train --epochs 20 --unfreeze-last-block   # also fine-tune layer4
 ```
 
-## 3. Collect webcam images
+Options:
 
-Use the main script to collect images for one class and split:
+- `--epochs`: default 15
+- `--batch-size`: default 8
+- `--lr`: default 0.001
 
-```powershell
-python COSC_4117EL_A3_G6_main.py collect --class-name bottled_water --split train --num 50
-```
+Outputs:
 
-Repeat the command for every class and every split. Recommended minimum counts:
+- `outputs/resnet18_retail_best.pth`: best validation model, with the class order stored in it
+- `outputs/resnet_training_history.csv`
+- `outputs/resnet_training_curves.png`
 
-- train: 40 images per class
-- validation: 10 images per class
-- test: 10 images per class
+## 4. Evaluate on the test set
 
-Collect multiple angles, distances, lighting conditions, backgrounds, and slight rotations. Do not duplicate the same image across train, validation, and test.
-
-During collection:
-
-- press `c` to capture one image;
-- press `a` to toggle automatic capture every 1.2 seconds;
-- press `q` to quit.
-
-## 4. Train ResNet18
-
-```powershell
-python COSC_4117EL_A3_G6_main.py train --epochs 15 --batch-size 8
-```
-
-Optional limited fine-tuning of the final residual block:
-
-```powershell
-python COSC_4117EL_A3_G6_main.py train --epochs 20 --unfreeze-last-block
-```
-
-The best model is saved as:
-
-```text
-outputs/resnet18_retail_best.pth
-```
-
-Training history is saved as:
-
-```text
-outputs/training_history.csv
-```
-
-## 5. Evaluate ResNet18
-
-```powershell
-python COSC_4117EL_A3_G6_main.py evaluate
+```bash
+python COSC_4117EL_A3_G6-main.py evaluate
 ```
 
 Outputs:
 
-- `outputs/resnet_metrics.csv`
+- `outputs/resnet_metrics.csv`: per-class precision, recall, F1 and support, plus the macro average
+- `outputs/resnet_summary.csv`: accuracy, macro P/R/F1, mean latency (ms/image), maximum FPS, parameter count, device
 - `outputs/resnet_confusion_matrix.png`
 
-The evaluation script calculates accuracy, per-class precision, recall, F1-score, and support without relying on scikit-learn.
+## 5. Real-time demo
 
-## 6. Run real-time ResNet18 inference
-
-```powershell
-python COSC_4117EL_A3_G6_main.py realtime
+```bash
+python COSC_4117EL_A3_G6-main.py realtime
+python COSC_4117EL_A3_G6-main.py realtime --camera 0 --threshold 0.70 --smooth 5
 ```
 
-Press `q` to quit. The green rectangle is the fixed product recognition region. If confidence is below the threshold, the program asks the user to reposition the product instead of forcing a prediction.
+The demo shows the product name and confidence, the model latency and the FPS. Probabilities are averaged over the last `--smooth` frames. When the confidence is below `--threshold`, the box turns red and the customer is asked to reposition the product. Press `q` to quit.
 
-Optional arguments:
+## 6. Bonus: compare ResNet18 with YOLO
 
-```powershell
-python COSC_4117EL_A3_G6_main.py realtime --camera 0 --threshold 0.70
+YOLOv8n-cls is trained on the same `dataset/` folders, so no bounding-box annotation is needed and both models are tested on the same images.
+
+```bash
+python COSC_4117EL_A3_G6-main.py train-yolo                 # --epochs 30 --batch-size 8
+python COSC_4117EL_A3_G6-main.py evaluate --model yolo
+python COSC_4117EL_A3_G6-main.py realtime --model yolo
+python COSC_4117EL_A3_G6-main.py compare
 ```
 
-## 7. Optional YOLOv8 bonus workflow
+Outputs:
 
-First ensure the setup script was not run with `--skip-yolo`. The YOLO configuration file should be:
+- `outputs/yolov8n_cls_retail/weights/best.pt`
+- `outputs/yolo_metrics.csv`, `outputs/yolo_summary.csv`, `outputs/yolo_confusion_matrix.png`
+- `outputs/resnet_vs_yolo_comparison.csv` and `.png`: measured accuracy, P/R/F1, latency and parameter counts for both models
 
-```text
-yolo_dataset/data.yaml
-```
+## 7. Report and video
 
-Place annotated images and labels under:
+1. Copy the results from `outputs/` into the report `COSC_4117EL_A3_G6.pdf`.
+2. Record the demo, upload it to YouTube and put the link in the report.
 
-```text
-yolo_dataset/images/train
-yolo_dataset/images/val
-yolo_dataset/images/test
-yolo_dataset/labels/train
-yolo_dataset/labels/val
-yolo_dataset/labels/test
-```
+The video should show:
 
-Train YOLOv8:
-
-```powershell
-python COSC_4117EL_A3_G6_main.py train-yolo --epochs 30 --imgsz 640 --batch-size 8
-```
-
-Run real-time YOLO detection:
-
-```powershell
-python COSC_4117EL_A3_G6_main.py yolo-realtime
-```
-
-Create the qualitative ResNet versus YOLO comparison table:
-
-```powershell
-python COSC_4117EL_A3_G6_main.py compare
-```
-
-The comparison table is saved as:
-
-```text
-outputs/resnet_yolo_comparison.csv
-```
-
-## 8. Report and video demonstration
-
-The report template is provided as:
-
-```text
-report/COSC_4117EL_A3_G6.pdf
-```
-
-After running the experiments, replace the placeholder result fields and YouTube link with the actual values. The video should show:
-
-- the webcam and self-checkout setup;
-- all six product classes;
-- real-time ResNet18 predictions and confidence values;
-- at least one low-confidence or misclassification case;
-- YOLO detection boxes if the bonus workflow is completed;
-- the final model comparison and conclusions.
-
-Upload the video to YouTube and insert the link in the PDF report.
-
-## 9. Auxiliary files
-
-The `src/` folder contains the earlier modular implementation and auxiliary scripts. The separate verification and PDF-generation scripts remain available there, but they are not required for the two-file main workflow.
-
-Rename the files if your group number is not G6. Do not upload a ZIP file.
+- the setup
+- all six products
+- live predictions with confidence and FPS
+- at least one low-confidence or misclassified case
+- the YOLO comparison
 
 ## Generative AI statement
 
-Generative AI assistance was used for boilerplate code, implementation structure, and report drafting. The proposed code was reviewed, adapted, and validated for the assignment. Any generated text or code is acknowledged in both the code comments and the report, as required by the assignment instructions.
+The initial code structure was drafted with Doubao. The code was then revised with Claude (Anthropic) to build it on the course sample and add the evaluation, smoothing and YOLO comparison. The group reviewed and tested all generated code. This use is acknowledged in the code comments and in the report, as the assignment requires.
