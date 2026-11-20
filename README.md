@@ -9,14 +9,14 @@ This project classifies six retail products in real time from a webcam feed. It 
 
 Classes are listed in alphabetical order, which is the order the model uses:
 
-| ID | Class |
-|---|---|
-| 0 | `bottled_water` |
-| 1 | `chips_bag` |
-| 2 | `cola_can` |
-| 3 | `instant_noodle_cup` |
-| 4 | `juice_box` |
-| 5 | `milk_bottle` |
+| ID | Class | Freiburg folder |
+|---|---|---|
+| 0 | `cereal` | `CEREAL` |
+| 1 | `chips` | `CHIPS` |
+| 2 | `juice` | `JUICE` |
+| 3 | `milk` | `MILK` |
+| 4 | `soda` | `SODA` |
+| 5 | `water` | `WATER` |
 
 ## Files
 
@@ -47,30 +47,35 @@ python COSC_4117EL_A3_G6-setup.py --skip-install  # create folders only
 python COSC_4117EL_A3_G6-setup.py --skip-yolo     # skip the bonus YOLO package
 ```
 
-## 2. Collect webcam images
+## 2. Prepare the data
+
+The images come from the public **Freiburg Groceries Dataset** (Jund et al., 2016, [arXiv:1611.05799](https://arxiv.org/abs/1611.05799)). The full dataset has 25 classes and about 5,000 photos, most of them showing whole supermarket shelves.
+
+For this project we kept 6 classes and hand-picked **30 photos per class (180 in total)** in which a single product is the clear subject, so they are closer to the one-product-in-the-box view of the live demo. These photos are stored in this repository under `raw/freiburg/<CLASS>/`, so no download is needed.
+
+Split them into train, validation and test sets. With only 30 images per class, a 60 / 20 / 20 split (18 / 6 / 6 per class, stratified, with a fixed seed per class) keeps the test set usable:
 
 ```bash
-python COSC_4117EL_A3_G6-main.py collect --class-name cola_can --split train --num 50
+python COSC_4117EL_A3_G6-main.py prepare --val 0.2 --test 0.2
 ```
 
-Repeat this command for all 6 classes and all 3 splits (`train`, `val`, `test`). Recommended number of images per class:
+Rerunning `prepare` is safe: copies of the public images from an earlier run are removed first, and webcam images are kept. The copied files are named `freiburg_*`. The exact split is saved in `outputs/public_data_split.csv`.
 
-- train: 40 to 60
-- val: 10 to 15
-- test: 10 to 15
+### Optional: add webcam images
 
-While collecting, place the product inside the green box. Only that region is saved, and the live demo classifies the same region.
+Webcam images narrow the gap between the dataset photos and the live demo:
+
+```bash
+python COSC_4117EL_A3_G6-main.py collect --class-name soda --split train --num 20
+```
+
+Place the product inside the green box. Only that region is saved, and the live demo classifies the same region.
 
 Keys:
 
 - `c`: capture one image
-- `a`: toggle automatic capture (one image every 1.2 s)
+- `a`: toggle automatic capture
 - `q`: quit
-
-Tips:
-
-- Vary the angle, distance, lighting and background.
-- Collect each split in a separate session, because neighbouring frames are nearly identical and would leak between train and test.
 
 ## 3. Train ResNet18
 

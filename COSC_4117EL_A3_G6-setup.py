@@ -26,14 +26,7 @@ DATA_DIR = PROJECT_ROOT / "dataset"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 # Must match CLASS_NAMES in COSC_4117EL_A3_G6-main.py (alphabetical order).
-CLASS_NAMES = [
-    "bottled_water",
-    "chips_bag",
-    "cola_can",
-    "instant_noodle_cup",
-    "juice_box",
-    "milk_bottle",
-]
+CLASS_NAMES = ["cereal", "chips", "juice", "milk", "soda", "water"]
 SPLITS = ["train", "val", "test"]
 
 CORE_PACKAGES = ["torch", "torchvision", "opencv-python", "numpy", "pillow", "matplotlib"]
@@ -70,8 +63,8 @@ def main() -> None:
             install_packages(YOLO_PACKAGES)
     create_folders()
     print("Setup complete. Project root:", PROJECT_ROOT)
-    print("Next: collect images, e.g.")
-    print("  python COSC_4117EL_A3_G6-main.py collect --class-name cola_can --split train --num 50")
+    print("Next: put the dataset images in raw/freiburg/ (see README), then run")
+    print("  python COSC_4117EL_A3_G6-main.py prepare")
 
 
 if __name__ == "__main__":

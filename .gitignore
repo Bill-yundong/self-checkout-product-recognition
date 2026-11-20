@@ -1,3 +1,7 @@
 .DS_Store
 CNN_ResNet_Sample.py
 005.pdf
+dataset/
+outputs/
+*.tar.gz
+.venv/

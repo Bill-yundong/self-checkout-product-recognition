@@ -21,8 +21,14 @@ course sample, fix the class-order and region-of-interest issues, and add the
 evaluation, smoothing and YOLO comparison code. All generated code was reviewed
 and tested by the group, and this use is also acknowledged in the report.
 
+Data: the public Freiburg Groceries Dataset (Jund et al., 2016,
+arXiv:1611.05799), extracted to raw/freiburg/. Six of its 25 classes are used:
+cereal, chips, juice, milk, soda, water. Optional webcam images can be added
+to the same folders.
+
 Workflow (run COSC_4117EL_A3_G6-setup.py first):
-    1. Collect images:   python COSC_4117EL_A3_G6-main.py collect --class-name cola_can --split train --num 50
+    1. Prepare data:     python COSC_4117EL_A3_G6-main.py prepare
+       (optional webcam) python COSC_4117EL_A3_G6-main.py collect --class-name soda --split train --num 20
     2. Train ResNet18:   python COSC_4117EL_A3_G6-main.py train
     3. Evaluate:         python COSC_4117EL_A3_G6-main.py evaluate
     4. Live demo:        python COSC_4117EL_A3_G6-main.py realtime
@@ -32,13 +38,15 @@ Workflow (run COSC_4117EL_A3_G6-setup.py first):
     7. Live demo YOLO:   python COSC_4117EL_A3_G6-main.py realtime --model yolo
     8. Compare models:   python COSC_4117EL_A3_G6-main.py compare
 
-Keys in webcam windows: 'c' capture, 'a' toggle auto-capture, 'q' quit.
+Keys in webcam windows: 'c' capture, 'a' toggle auto-capture, 'q' or Esc quit
+(closing the window also quits).
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import random
+import shutil
 import time
 from collections import deque
 from pathlib import Path
@@ -63,21 +71,35 @@ from torchvision.models import ResNet18_Weights, resnet18
 # Configuration
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "dataset"        # dataset/<split>/<class>/*.jpg
+DATA_DIR = PROJECT_ROOT / "dataset"        # dataset/<split>/<class>/*.jpg|png
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
+FREIBURG_DIR = PROJECT_ROOT / "raw" / "freiburg"   # Freiburg images/<CLASS>/
 
-# [MODIFIED] The sample used three generic classes (class1..class3). We use six
-# retail products. They are listed in alphabetical order on purpose, because
-# torchvision ImageFolder and Ultralytics both number classes alphabetically.
-# The trained class order is also stored in the checkpoint (see save_checkpoint).
+# [MODIFIED] The sample used three generic classes (class1..class3). We use
+# six retail product classes from the Freiburg Groceries Dataset. They are in
+# alphabetical order on purpose, because torchvision ImageFolder and
+# Ultralytics both number classes alphabetically. The trained class order is
+# also stored in the checkpoint (see save_checkpoint).
 CLASS_NAMES = [
-    "bottled_water",
-    "chips_bag",
-    "cola_can",
-    "instant_noodle_cup",
-    "juice_box",
-    "milk_bottle",
+    "cereal",
+    "chips",
+    "juice",
+    "milk",
+    "soda",
+    "water",
 ]
+# [NEW] Where the images of each class come from: (file-name prefix, folder).
+CLASS_SOURCES = {
+    "cereal": ("freiburg", FREIBURG_DIR / "CEREAL"),
+    "chips": ("freiburg", FREIBURG_DIR / "CHIPS"),
+    "juice": ("freiburg", FREIBURG_DIR / "JUICE"),
+    "milk": ("freiburg", FREIBURG_DIR / "MILK"),
+    "soda": ("freiburg", FREIBURG_DIR / "SODA"),
+    "water": ("freiburg", FREIBURG_DIR / "WATER"),
+}
+PUBLIC_PREFIXES = sorted({prefix for prefix, _ in CLASS_SOURCES.values()})
+SPLIT_MANIFEST = OUTPUT_DIR / "public_data_split.csv"
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 SPLITS = ["train", "val", "test"]
 IMAGE_SIZE = 224                            # [SAMPLE] ResNet18 input size
 IMAGENET_MEAN = [0.485, 0.456, 0.406]       # [SAMPLE]
@@ -107,13 +129,25 @@ def set_seed(seed: int = RANDOM_SEED) -> None:
     torch.manual_seed(seed)
 
 
-def get_device() -> torch.device:
-    """[SAMPLE] Use CUDA if available. [MODIFIED] Also use Apple MPS on Macs."""
+DEVICE_CHOICES = ["auto", "cpu", "mps", "cuda"]
+
+
+def get_device(choice: str = "auto") -> torch.device:
+    """[SAMPLE] Use CUDA if available. [MODIFIED] Also use Apple MPS on Macs,
+    and allow forcing a device with --device (for example --device cpu on
+    older macOS versions where recent PyTorch MPS kernels crash)."""
+    if choice != "auto":
+        return torch.device(choice)
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def ultralytics_device(device: torch.device) -> str:
+    """[NEW] Convert a torch device to the string Ultralytics expects."""
+    return "0" if device.type == "cuda" else device.type
 
 
 def get_roi(frame: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int, int]]:
@@ -128,6 +162,20 @@ def get_roi(frame: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     return frame[y1:y2, x1:x2], (x1, y1, x2, y2)
 
 
+def should_quit(window_name: str, key: int) -> bool:
+    """[NEW] Quit on 'q' or Esc, or when the window's close button was clicked.
+
+    On macOS the close button only hides an OpenCV window and the loop would
+    keep running, so the window's visibility is checked as well.
+    """
+    if key in (ord("q"), 27):
+        return True
+    try:
+        return cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1
+    except cv2.error:
+        return True
+
+
 def open_camera(camera_index: int) -> cv2.VideoCapture:
     """[SAMPLE] Open the webcam. [NEW] Fail with a clear message if it cannot."""
     cap = cv2.VideoCapture(camera_index)
@@ -137,29 +185,88 @@ def open_camera(camera_index: int) -> cv2.VideoCapture:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Collect data using the webcam
+# Step 0: Prepare the public dataset
 # ---------------------------------------------------------------------------
-def collect_data(class_name: str, split: str, num_samples: int, camera_index: int) -> None:
+def prepare_public_data(args: argparse.Namespace) -> None:
+    """[NEW] Copy the chosen public-dataset classes into dataset/<split>/<class>/.
+
+    Each class is split separately (stratified) with its own fixed seed, so
+    every group member gets exactly the same train/validation/test images and
+    adding a class later does not change the split of the other classes.
+    Public-data copies from an earlier run are always removed first, so an
+    image can never end up in two splits; webcam images are kept.
+    Copied files are prefixed with their source ("freiburg_") so they can
+    live next to optional webcam images in the same folders. The split is written to outputs/public_data_split.csv.
+    """
+    if args.val + args.test >= 1:
+        raise ValueError("--val plus --test must be below 1.")
+    missing = [str(folder) for _, folder in CLASS_SOURCES.values() if not folder.exists()]
+    if missing:
+        raise FileNotFoundError("Missing source folders (see README, step 2): " + ", ".join(missing))
+
+    manifest = []
+    print(f"{'class':<10}{'source':<14}{'train':>7}{'val':>7}{'test':>7}")
+    for class_name in CLASS_NAMES:
+        prefix, source_dir = CLASS_SOURCES[class_name]
+        files = sorted(p for p in source_dir.glob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
+        if not files:
+            raise FileNotFoundError(f"No images found in {source_dir}.")
+        random.Random(f"{RANDOM_SEED}-{class_name}").shuffle(files)
+        n_test = round(len(files) * args.test)
+        n_val = round(len(files) * args.val)
+        parts = {"test": files[:n_test], "val": files[n_test:n_test + n_val],
+                 "train": files[n_test + n_val:]}
+
+        for split, split_files in parts.items():
+            target_dir = DATA_DIR / split / class_name
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for old_prefix in PUBLIC_PREFIXES:  # remove earlier public-data copies
+                for old in target_dir.glob(f"{old_prefix}_*"):
+                    old.unlink()
+            for path in split_files:
+                target = target_dir / f"{prefix}_{path.name.lower()}"
+                shutil.copy2(path, target)
+                manifest.append([split, class_name, prefix, path.name, target.name])
+        print(f"{class_name:<10}{prefix:<14}{len(parts['train']):>7}"
+              f"{len(parts['val']):>7}{len(parts['test']):>7}")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with SPLIT_MANIFEST.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["split", "class", "source", "source_file", "dataset_file"])
+        writer.writerows(manifest)
+    print(f"Copied {len(manifest)} images into {DATA_DIR}. Split list: {SPLIT_MANIFEST}")
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Collect data using the webcam (optional extra data)
+# ---------------------------------------------------------------------------
+def collect_data(class_name: str, split: str, num_samples: int, camera_index: int,
+                 auto: bool = False, interval: float = 1.2, delay: float = 3.0) -> None:
     """Collect webcam images of one product for one data split.
 
     [SAMPLE] Press 'c' to save the current frame, stop after num_samples.
     [MODIFIED] Save only the green placement region (ROI) instead of the full
     frame, and store images in dataset/<split>/<class>/ so that train,
     validation and test images are kept apart.
-    [NEW] Press 'a' to toggle automatic capture every 1.2 s, 'q' to quit early.
+    [NEW] Press 'a' to toggle automatic capture, 'q' or Esc to quit early.
+    With auto=True automatic capture starts by itself after a short countdown,
+    so both hands are free to hold and turn the product.
     """
     output_dir = DATA_DIR / split / class_name
     output_dir.mkdir(parents=True, exist_ok=True)
     # [NEW] Continue numbering after existing files so nothing is overwritten.
-    existing = [int(p.stem.rsplit("_", 1)[-1]) for p in output_dir.glob("*.jpg")
+    existing = [int(p.stem.rsplit("_", 1)[-1]) for p in output_dir.glob(f"{class_name}_*.jpg")
                 if p.stem.rsplit("_", 1)[-1].isdigit()]
     next_index = max(existing, default=-1) + 1
 
     cap = open_camera(camera_index)
     count = 0
-    auto_mode = False
-    last_capture = 0.0
-    print(f"Collecting {class_name} ({split}). Keys: c=capture, a=auto, q=quit")
+    auto_mode = auto
+    start_time = time.time()
+    last_capture = start_time + delay - interval if auto else 0.0  # first shot after the countdown
+    print(f"Collecting {class_name} ({split}). Keys (click the camera window first): "
+          f"c=capture, a=auto on/off, q=quit")
 
     while True:
         ret, frame = cap.read()
@@ -170,16 +277,19 @@ def collect_data(class_name: str, split: str, num_samples: int, camera_index: in
         display = frame.copy()
         cv2.rectangle(display, (x1, y1), (x2, y2), (0, 200, 0), 2)
         mode = "AUTO" if auto_mode else "manual"
+        remaining = delay - (time.time() - start_time)
+        if auto_mode and remaining > 0:
+            mode = f"AUTO starts in {remaining:.0f}s"
         cv2.putText(display, f"{class_name} [{split}] {count}/{num_samples} ({mode})",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.imshow("Collect Data", display)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
+        if should_quit("Collect Data", key):
             break
         if key == ord("a"):
             auto_mode = not auto_mode
-        capture = key == ord("c") or (auto_mode and time.time() - last_capture >= 1.2)
+        capture = key == ord("c") or (auto_mode and time.time() - last_capture >= interval)
 
         if capture:
             file_path = output_dir / f"{class_name}_{next_index:04d}.jpg"
@@ -194,6 +304,7 @@ def collect_data(class_name: str, split: str, num_samples: int, camera_index: in
     # [SAMPLE] Release the webcam and close OpenCV windows.
     cap.release()
     cv2.destroyAllWindows()
+    cv2.waitKey(1)  # [NEW] lets macOS actually close the window
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +462,7 @@ def train_resnet(args: argparse.Namespace) -> None:
     and optional fine-tuning of the last residual block (layer4).
     """
     set_seed()
-    device = get_device()
+    device = get_device(args.device)
     train_loader, val_loader, class_names = build_dataloaders(args.batch_size)
     print(f"Device: {device} | classes: {class_names}")
     print(f"Train images: {len(train_loader.dataset)} | validation images: {len(val_loader.dataset)}")
@@ -423,29 +534,29 @@ def load_yolo():
     return YOLO
 
 
-def make_yolo_predictor() -> tuple[Predictor, list[str], int]:
+def make_yolo_predictor(device: torch.device) -> tuple[Predictor, list[str], int]:
     """[NEW] Return a YOLOv8-cls predictor with the same interface as ResNet18."""
     if not YOLO_WEIGHTS.exists():
         raise FileNotFoundError(f"Missing {YOLO_WEIGHTS}. Run the train-yolo command first.")
     model = load_yolo()(str(YOLO_WEIGHTS))
-    device = str(get_device())  # same device as ResNet18 for a fair speed comparison
+    yolo_device = ultralytics_device(device)  # same device as ResNet18 for a fair comparison
     names = model.names  # {index: class_name}
     class_names = [names[i] for i in sorted(names)]
 
     def predict(image_bgr: np.ndarray) -> np.ndarray:
         # Ultralytics accepts OpenCV BGR arrays directly.
-        result = model.predict(image_bgr, imgsz=IMAGE_SIZE, device=device, verbose=False)[0]
+        result = model.predict(image_bgr, imgsz=IMAGE_SIZE, device=yolo_device, verbose=False)[0]
         return result.probs.data.cpu().numpy()
 
     num_params = sum(p.numel() for p in model.model.parameters())
     return predict, class_names, num_params
 
 
-def make_predictor(model_name: str) -> tuple[Predictor, list[str], int]:
+def make_predictor(model_name: str, device: torch.device) -> tuple[Predictor, list[str], int]:
     """[NEW] Build the predictor for 'resnet' or 'yolo'."""
     if model_name == "yolo":
-        return make_yolo_predictor()
-    return make_resnet_predictor(get_device())
+        return make_yolo_predictor(device)
+    return make_resnet_predictor(device)
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +568,7 @@ def list_test_images(class_names: list[str]) -> list[tuple[Path, int]]:
     for label, class_name in enumerate(class_names):
         folder = DATA_DIR / "test" / class_name
         for path in sorted(folder.glob("*")):
-            if path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+            if path.suffix.lower() in IMAGE_SUFFIXES:
                 samples.append((path, label))
     if not samples:
         raise FileNotFoundError(f"No test images found in {DATA_DIR / 'test'}.")
@@ -504,7 +615,8 @@ def evaluate(args: argparse.Namespace) -> None:
     predictor as the live demo, and the time per image is measured so the
     report can state inference latency and the maximum achievable FPS.
     """
-    predict, class_names, num_params = make_predictor(args.model)
+    device = get_device(args.device)
+    predict, class_names, num_params = make_predictor(args.model, device)
     samples = list_test_images(class_names)
     matrix = np.zeros((len(class_names), len(class_names)), dtype=np.int64)
 
@@ -525,7 +637,6 @@ def evaluate(args: argparse.Namespace) -> None:
     accuracy = float(np.trace(matrix) / matrix.sum())
     macro = {key: float(np.mean([row[key] for row in rows])) for key in ("precision", "recall", "f1")}
     mean_latency = float(np.mean(latencies_ms))
-    device = str(get_device())
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with (OUTPUT_DIR / f"{args.model}_metrics.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -547,7 +658,7 @@ def evaluate(args: argparse.Namespace) -> None:
         "max_model_fps": f"{1000 / mean_latency:.1f}",
         "parameters": num_params,
         "test_images": int(matrix.sum()),
-        "device": device,
+        "device": str(device),
     }
     with (OUTPUT_DIR / f"{args.model}_summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -577,7 +688,7 @@ def realtime(args: argparse.Namespace) -> None:
         reposition the product instead of guessing;
       * on-screen model latency (ms) and smoothed FPS for the report and video.
     """
-    predict, class_names, _ = make_predictor(args.model)
+    predict, class_names, _ = make_predictor(args.model, get_device(args.device))
     title = "ResNet18" if args.model == "resnet" else "YOLOv8n-cls"
     recent = deque(maxlen=max(1, args.smooth))
     cap = open_camera(args.camera)
@@ -613,15 +724,17 @@ def realtime(args: argparse.Namespace) -> None:
         cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
         cv2.putText(frame, f"{title} | {latency_ms:.1f} ms | {fps:.1f} FPS",
                     (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        cv2.imshow(f"Predictions - {title}", frame)
+        window = f"Predictions - {title}"
+        cv2.imshow(window, frame)
 
-        # [SAMPLE] Exit loop on pressing 'q' key.
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        # [SAMPLE] Exit loop on pressing 'q' key. [NEW] Also Esc or the close button.
+        if should_quit(window, cv2.waitKey(1) & 0xFF):
             break
 
     print(f"Average model latency {latency_ms:.1f} ms, display FPS {fps:.1f}")
     cap.release()
     cv2.destroyAllWindows()
+    cv2.waitKey(1)  # [NEW] lets macOS actually close the window
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +751,7 @@ def train_yolo(args: argparse.Namespace) -> None:
     model = YOLO(args.weights)
     model.train(data=str(DATA_DIR), epochs=args.epochs, imgsz=IMAGE_SIZE, batch=args.batch_size,
                 project=str(OUTPUT_DIR), name=YOLO_RUN_NAME, exist_ok=True, seed=RANDOM_SEED,
+                device=ultralytics_device(get_device(args.device)),
                 fliplr=0.0)  # no mirroring, same reason as for ResNet18
     print(f"YOLO weights saved to {YOLO_WEIGHTS}")
 
@@ -695,12 +809,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Assignment 3 Group 6: retail product recognition.")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("prepare", help="Split the public-dataset classes into dataset/train|val|test.")
+    p.add_argument("--val", type=float, default=0.15)
+    p.add_argument("--test", type=float, default=0.15)
+    p.set_defaults(func=prepare_public_data)
+
     p = sub.add_parser("collect", help="Collect webcam images for one class and split.")
     p.add_argument("--class-name", required=True, choices=CLASS_NAMES)
     p.add_argument("--split", required=True, choices=SPLITS)
     p.add_argument("--num", type=int, default=50)
     p.add_argument("--camera", type=int, default=0)
-    p.set_defaults(func=lambda a: collect_data(a.class_name, a.split, a.num, a.camera))
+    p.add_argument("--auto", action="store_true",
+                   help="Start automatic capture after a short countdown (hands-free).")
+    p.add_argument("--interval", type=float, default=1.2, help="Seconds between automatic captures.")
+    p.add_argument("--delay", type=float, default=3.0, help="Countdown before automatic capture starts.")
+    p.set_defaults(func=lambda a: collect_data(a.class_name, a.split, a.num, a.camera,
+                                               a.auto, a.interval, a.delay))
 
     p = sub.add_parser("train", help="Train ResNet18 with transfer learning.")
     p.add_argument("--epochs", type=int, default=15)
@@ -708,10 +832,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=0.001)
     p.add_argument("--unfreeze-last-block", action="store_true",
                    help="Fine-tune layer4 during the second half of training.")
+    p.add_argument("--device", choices=DEVICE_CHOICES, default="auto",
+                   help="auto picks CUDA, then Apple MPS, then CPU.")
     p.set_defaults(func=train_resnet)
 
     p = sub.add_parser("evaluate", help="Evaluate a trained model on dataset/test.")
     p.add_argument("--model", choices=["resnet", "yolo"], default="resnet")
+    p.add_argument("--device", choices=DEVICE_CHOICES, default="auto",
+                   help="auto picks CUDA, then Apple MPS, then CPU.")
     p.set_defaults(func=evaluate)
 
     p = sub.add_parser("realtime", help="Run live webcam classification.")
@@ -719,12 +847,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--threshold", type=float, default=0.70)
     p.add_argument("--smooth", type=int, default=5, help="Number of frames to average.")
+    p.add_argument("--device", choices=DEVICE_CHOICES, default="auto",
+                   help="auto picks CUDA, then Apple MPS, then CPU.")
     p.set_defaults(func=realtime)
 
     p = sub.add_parser("train-yolo", help="Bonus: train YOLOv8n-cls on the same dataset.")
     p.add_argument("--weights", default="yolov8n-cls.pt")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--device", choices=DEVICE_CHOICES, default="auto",
+                   help="auto picks CUDA, then Apple MPS, then CPU.")
     p.set_defaults(func=train_yolo)
 
     p = sub.add_parser("compare", help="Bonus: build the ResNet18 vs YOLO comparison.")
