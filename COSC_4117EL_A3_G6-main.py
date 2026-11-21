@@ -8,7 +8,7 @@ Group members: Qingdong Wu (0460101), Yuhang Zhao (0452606)
 This program extends the course sample code (CNN_ResNet_Sample.py). The sample
 collects webcam images, trains ResNet18 with a frozen backbone and a new final
 layer, and shows live predictions. This version keeps that flow and adapts it
-to a six-class retail self-checkout problem.
+to an eight-class retail self-checkout problem.
 
 Provenance tags used in the comments below:
     [SAMPLE]    kept from CNN_ResNet_Sample.py (same logic, possibly renamed)
@@ -22,9 +22,12 @@ evaluation, smoothing and YOLO comparison code. All generated code was reviewed
 and tested by the group, and this use is also acknowledged in the report.
 
 Data: the public Freiburg Groceries Dataset (Jund et al., 2016,
-arXiv:1611.05799), extracted to raw/freiburg/. Six of its 25 classes are used:
-cereal, chips, juice, milk, soda, water. Optional webcam images can be added
-to the same folders.
+arXiv:1611.05799). Six of its 25 classes are used (cereal, chips, juice, milk,
+soda, water), with 30 hand-picked single-product photos per class stored in
+raw/freiburg/. Two more classes, umbrella and water_bottle (a reusable bottle
+for drinking water), are not in Freiburg and are collected with the webcam
+only (collect command, all three splits). Optional webcam images can be added
+to the other classes as well.
 
 Workflow (run COSC_4117EL_A3_G6-setup.py first):
     1. Prepare data:     python COSC_4117EL_A3_G6-main.py prepare
@@ -38,8 +41,10 @@ Workflow (run COSC_4117EL_A3_G6-setup.py first):
     7. Live demo YOLO:   python COSC_4117EL_A3_G6-main.py realtime --model yolo
     8. Compare models:   python COSC_4117EL_A3_G6-main.py compare
 
-Keys in webcam windows: 'c' capture, 'a' toggle auto-capture, 'q' or Esc quit
-(closing the window also quits).
+Keys in webcam windows: 'c' capture, 'a' toggle auto-capture, 's' save a
+screenshot (realtime), 'b' record the empty background again (realtime),
+'q' or Esc quit (closing the window also quits). Keep the green box empty for
+about a second when realtime starts, so the background can be recorded.
 """
 from __future__ import annotations
 
@@ -76,7 +81,9 @@ OUTPUT_DIR = PROJECT_ROOT / "outputs"
 FREIBURG_DIR = PROJECT_ROOT / "raw" / "freiburg"   # Freiburg images/<CLASS>/
 
 # [MODIFIED] The sample used three generic classes (class1..class3). We use
-# six retail product classes from the Freiburg Groceries Dataset. They are in
+# eight classes: six retail products from the Freiburg Groceries Dataset plus
+# two webcam-only classes, "umbrella" and "water_bottle" (a reusable
+# drinking-water bottle). They are in
 # alphabetical order on purpose, because torchvision ImageFolder and
 # Ultralytics both number classes alphabetically. The trained class order is
 # also stored in the checkpoint (see save_checkpoint).
@@ -86,9 +93,12 @@ CLASS_NAMES = [
     "juice",
     "milk",
     "soda",
+    "umbrella",
     "water",
+    "water_bottle",
 ]
-# [NEW] Where the images of each class come from: (file-name prefix, folder).
+# [NEW] Where the public images of each class come from: (file-name prefix,
+# folder). Classes missing here (umbrella, water_bottle) have webcam images only.
 CLASS_SOURCES = {
     "cereal": ("freiburg", FREIBURG_DIR / "CEREAL"),
     "chips": ("freiburg", FREIBURG_DIR / "CHIPS"),
@@ -113,6 +123,8 @@ HISTORY_PATH = OUTPUT_DIR / "resnet_training_history.csv"
 CURVES_PATH = OUTPUT_DIR / "resnet_training_curves.png"
 COMPARISON_CSV = OUTPUT_DIR / "resnet_vs_yolo_comparison.csv"
 COMPARISON_PNG = OUTPUT_DIR / "resnet_vs_yolo_comparison.png"
+SCREENSHOT_DIR = OUTPUT_DIR / "screenshots"
+RECORDING_DIR = OUTPUT_DIR / "recordings"
 
 # A predictor takes one BGR image (the ROI) and returns class probabilities
 # ordered like CLASS_NAMES.
@@ -176,6 +188,43 @@ def should_quit(window_name: str, key: int) -> bool:
         return True
 
 
+class FrameRecorder:
+    """[NEW] Save the annotated window to an .mp4 file (--record), so the demo
+    can be recorded without screen-recording software.
+
+    Frames are written at a fixed rate based on elapsed time, so the video
+    plays back at real speed even when the loop is slower than the camera.
+    """
+
+    def __init__(self, name: str, fps: float = 20.0) -> None:
+        RECORDING_DIR.mkdir(parents=True, exist_ok=True)
+        self.path = RECORDING_DIR / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        self.fps = fps
+        self.writer: cv2.VideoWriter | None = None
+        self.start = 0.0
+        self.written = 0
+
+    def write(self, frame: np.ndarray) -> None:
+        if self.writer is None:
+            height, width = frame.shape[:2]
+            for codec in ("avc1", "mp4v"):  # H.264 where available, else MPEG-4
+                self.writer = cv2.VideoWriter(str(self.path), cv2.VideoWriter_fourcc(*codec),
+                                              self.fps, (width, height))
+                if self.writer.isOpened():
+                    break
+            self.start = time.perf_counter()
+            print(f"Recording to {self.path}")
+        due = int((time.perf_counter() - self.start) * self.fps) + 1
+        while self.written < due:  # repeat the frame to keep real-time speed
+            self.writer.write(frame)
+            self.written += 1
+
+    def close(self) -> None:
+        if self.writer is not None:
+            self.writer.release()
+            print(f"Recording saved: {self.path} ({self.written / self.fps:.1f} s)")
+
+
 def open_camera(camera_index: int) -> cv2.VideoCapture:
     """[SAMPLE] Open the webcam. [NEW] Fail with a clear message if it cannot."""
     cap = cv2.VideoCapture(camera_index)
@@ -205,8 +254,13 @@ def prepare_public_data(args: argparse.Namespace) -> None:
         raise FileNotFoundError("Missing source folders (see README, step 2): " + ", ".join(missing))
 
     manifest = []
-    print(f"{'class':<10}{'source':<14}{'train':>7}{'val':>7}{'test':>7}")
+    print(f"{'class':<14}{'source':<14}{'train':>7}{'val':>7}{'test':>7}")
     for class_name in CLASS_NAMES:
+        if class_name not in CLASS_SOURCES:  # webcam-only class: just make sure folders exist
+            for split in SPLITS:
+                (DATA_DIR / split / class_name).mkdir(parents=True, exist_ok=True)
+            print(f"{class_name:<14}{'webcam only':<14}  (use the collect command)")
+            continue
         prefix, source_dir = CLASS_SOURCES[class_name]
         files = sorted(p for p in source_dir.glob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
         if not files:
@@ -227,7 +281,7 @@ def prepare_public_data(args: argparse.Namespace) -> None:
                 target = target_dir / f"{prefix}_{path.name.lower()}"
                 shutil.copy2(path, target)
                 manifest.append([split, class_name, prefix, path.name, target.name])
-        print(f"{class_name:<10}{prefix:<14}{len(parts['train']):>7}"
+        print(f"{class_name:<14}{prefix:<14}{len(parts['train']):>7}"
               f"{len(parts['val']):>7}{len(parts['test']):>7}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -242,7 +296,8 @@ def prepare_public_data(args: argparse.Namespace) -> None:
 # Step 1: Collect data using the webcam (optional extra data)
 # ---------------------------------------------------------------------------
 def collect_data(class_name: str, split: str, num_samples: int, camera_index: int,
-                 auto: bool = False, interval: float = 1.2, delay: float = 3.0) -> None:
+                 auto: bool = False, interval: float = 1.2, delay: float = 3.0,
+                 record: bool = False) -> None:
     """Collect webcam images of one product for one data split.
 
     [SAMPLE] Press 'c' to save the current frame, stop after num_samples.
@@ -261,6 +316,7 @@ def collect_data(class_name: str, split: str, num_samples: int, camera_index: in
     next_index = max(existing, default=-1) + 1
 
     cap = open_camera(camera_index)
+    recorder = FrameRecorder(f"collect_{class_name}_{split}") if record else None
     count = 0
     auto_mode = auto
     start_time = time.time()
@@ -283,6 +339,8 @@ def collect_data(class_name: str, split: str, num_samples: int, camera_index: in
         cv2.putText(display, f"{class_name} [{split}] {count}/{num_samples} ({mode})",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.imshow("Collect Data", display)
+        if recorder is not None:
+            recorder.write(display)
 
         key = cv2.waitKey(1) & 0xFF
         if should_quit("Collect Data", key):
@@ -302,6 +360,8 @@ def collect_data(class_name: str, split: str, num_samples: int, camera_index: in
                 break
 
     # [SAMPLE] Release the webcam and close OpenCV windows.
+    if recorder is not None:
+        recorder.close()
     cap.release()
     cv2.destroyAllWindows()
     cv2.waitKey(1)  # [NEW] lets macOS actually close the window
@@ -338,6 +398,17 @@ def build_transforms(train: bool) -> transforms.Compose:
     ])
 
 
+def check_class_folders(split: str) -> None:
+    """[NEW] Fail early with a clear message if a class has no images in a split
+    (for example a webcam-only class before it has been collected)."""
+    empty = [c for c in CLASS_NAMES
+             if not any(p.suffix.lower() in IMAGE_SUFFIXES for p in (DATA_DIR / split / c).glob("*"))]
+    if empty:
+        hints = "\n".join(f"  python COSC_4117EL_A3_G6-main.py collect --class-name {c} --split {split} --auto"
+                          for c in empty)
+        raise FileNotFoundError(f"No {split} images for: {', '.join(empty)}. Collect them first, e.g.\n{hints}")
+
+
 def build_dataloaders(batch_size: int) -> tuple[DataLoader, DataLoader, list[str]]:
     """Create training and validation loaders from dataset/train and dataset/val.
 
@@ -348,6 +419,7 @@ def build_dataloaders(batch_size: int) -> tuple[DataLoader, DataLoader, list[str
     for split in ("train", "val"):
         if not (DATA_DIR / split).exists():
             raise FileNotFoundError(f"Missing {DATA_DIR / split}. Run setup and collect images first.")
+        check_class_folders(split)
     train_set = datasets.ImageFolder(DATA_DIR / "train", build_transforms(train=True))
     val_set = datasets.ImageFolder(DATA_DIR / "val", build_transforms(train=False))
     if train_set.classes != val_set.classes:
@@ -565,6 +637,7 @@ def make_predictor(model_name: str, device: torch.device) -> tuple[Predictor, li
 def list_test_images(class_names: list[str]) -> list[tuple[Path, int]]:
     """[NEW] Return (image path, label index) pairs from dataset/test."""
     samples = []
+    check_class_folders("test")
     for label, class_name in enumerate(class_names):
         folder = DATA_DIR / "test" / class_name
         for path in sorted(folder.glob("*")):
@@ -675,6 +748,51 @@ def evaluate(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Step 4: Real-time classification with the webcam
 # ---------------------------------------------------------------------------
+class PresenceDetector:
+    """[NEW] Decide whether anything has been placed in the placement region.
+
+    At start-up the empty region is recorded as the background. A frame counts
+    as "product present" when enough pixels differ clearly from it. While the
+    region is empty the background is updated slowly, so gradual lighting
+    changes and camera auto-exposure are absorbed.
+    """
+
+    def __init__(self, min_changed: float, pixel_threshold: int = 30, adapt_rate: float = 0.05) -> None:
+        self.min_changed = min_changed
+        self.pixel_threshold = pixel_threshold
+        self.adapt_rate = adapt_rate
+        self.background: np.ndarray | None = None
+        self.samples: list[np.ndarray] = []
+
+    @staticmethod
+    def _prepare(roi: np.ndarray) -> np.ndarray:
+        small = cv2.resize(roi, (160, 120))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(gray, (7, 7), 0).astype(np.float32)
+
+    def reset(self) -> None:
+        """Start recording the background again (key 'b')."""
+        self.background, self.samples = None, []
+
+    @property
+    def calibrating(self) -> bool:
+        return self.background is None
+
+    def update(self, roi: np.ndarray) -> tuple[bool, float]:
+        """Return (product present, fraction of changed pixels)."""
+        current = self._prepare(roi)
+        if self.background is None:
+            self.samples.append(current)
+            if len(self.samples) >= 20:  # about 1 s of empty frames
+                self.background = np.mean(self.samples, axis=0)
+            return False, 0.0
+        changed = float(np.mean(np.abs(current - self.background) > self.pixel_threshold))
+        present = changed >= self.min_changed
+        if not present:
+            self.background = (1 - self.adapt_rate) * self.background + self.adapt_rate * current
+        return present, changed
+
+
 def realtime(args: argparse.Namespace) -> None:
     """Classify the product in the placement region of each webcam frame.
 
@@ -682,38 +800,57 @@ def realtime(args: argparse.Namespace) -> None:
     [MODIFIED] Only the green placement region is classified (same region as
     in data collection) instead of the whole frame.
     [NEW] Real-time adaptations:
+      * presence check: the empty region is recorded at start-up; while
+        nothing differs from it the screen shows "Detecting..." and the model
+        is not run, so an empty checkout is never reported as a product
+        (press 'b' to record the background again);
       * temporal smoothing: probabilities are averaged over the last N frames,
         which stops the label from flickering between classes;
-      * confidence threshold: below it the system asks the customer to
-        reposition the product instead of guessing;
-      * on-screen model latency (ms) and smoothed FPS for the report and video.
+      * confidence threshold: below it the item is shown as "Unknown"
+        instead of guessing one of the trained classes;
+      * on-screen model latency (ms) and smoothed FPS for the report and video;
+      * press 's' to save the current annotated frame to outputs/screenshots/;
+      * --record saves the annotated window as a video in outputs/recordings/.
     """
     predict, class_names, _ = make_predictor(args.model, get_device(args.device))
     title = "ResNet18" if args.model == "resnet" else "YOLOv8n-cls"
     recent = deque(maxlen=max(1, args.smooth))
+    presence = PresenceDetector(args.min_change) if not args.no_presence else None
     cap = open_camera(args.camera)
+    recorder = FrameRecorder(f"realtime_{args.model}") if args.record else None
+    ret, first_frame = cap.read()
+    if ret:  # [NEW] warm-up run, so the slow first inference is not counted in the latency
+        predict(get_roi(first_frame)[0])
     fps, latency_ms = 0.0, 0.0
     previous = time.perf_counter()
+    print("Keep the green box EMPTY for about 1 second while the background is recorded.")
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         roi, (x1, y1, x2, y2) = get_roi(frame)
+        present, changed = (True, 1.0) if presence is None else presence.update(roi)
 
-        start = time.perf_counter()
-        recent.append(predict(roi))
-        frame_latency = (time.perf_counter() - start) * 1000
-        # Exponential moving averages keep the on-screen numbers readable.
-        latency_ms = 0.9 * latency_ms + 0.1 * frame_latency if latency_ms else frame_latency
-        probabilities = np.mean(recent, axis=0)
-        index = int(np.argmax(probabilities))
-        confidence = float(probabilities[index])
-
-        if confidence >= args.threshold:
-            label, colour = f"{class_names[index]} ({confidence:.2f})", (0, 200, 0)
+        if presence is not None and presence.calibrating:
+            recent.clear()
+            label, colour = "Calibrating background - keep the box empty", (0, 200, 255)
+        elif not present:
+            recent.clear()  # forget the previous item so it does not linger
+            label, colour = "Detecting... place a product in the box", (0, 200, 255)
         else:
-            label, colour = f"Low confidence ({confidence:.2f}) - reposition", (0, 0, 255)
+            start = time.perf_counter()
+            recent.append(predict(roi))
+            frame_latency = (time.perf_counter() - start) * 1000
+            # Exponential moving averages keep the on-screen numbers readable.
+            latency_ms = 0.9 * latency_ms + 0.1 * frame_latency if latency_ms else frame_latency
+            probabilities = np.mean(recent, axis=0)
+            index = int(np.argmax(probabilities))
+            confidence = float(probabilities[index])
+            if confidence >= args.threshold:
+                label, colour = f"{class_names[index]} ({confidence:.2f})", (0, 200, 0)
+            else:
+                label, colour = f"Unknown ({confidence:.2f})", (0, 0, 255)
 
         now = time.perf_counter()
         instant_fps = 1.0 / max(now - previous, 1e-6)
@@ -722,16 +859,32 @@ def realtime(args: argparse.Namespace) -> None:
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 2)
         cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
-        cv2.putText(frame, f"{title} | {latency_ms:.1f} ms | {fps:.1f} FPS",
-                    (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        status = f"{title} | {latency_ms:.1f} ms | {fps:.1f} FPS"
+        if presence is not None and not presence.calibrating:
+            status += f" | change {changed:.2f}"
+        cv2.putText(frame, status, (10, frame.shape[0] - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         window = f"Predictions - {title}"
         cv2.imshow(window, frame)
+        if recorder is not None:
+            recorder.write(frame)
 
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("s"):  # [NEW] save a screenshot for the report
+            SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            shot = SCREENSHOT_DIR / f"{args.model}_{time.strftime('%Y%m%d_%H%M%S')}.png"
+            cv2.imwrite(str(shot), frame)
+            print(f"Screenshot saved: {shot}")
+        if key == ord("b") and presence is not None:  # [NEW] record the empty background again
+            presence.reset()
+            print("Recording the background again - keep the box empty.")
         # [SAMPLE] Exit loop on pressing 'q' key. [NEW] Also Esc or the close button.
-        if should_quit(window, cv2.waitKey(1) & 0xFF):
+        if should_quit(window, key):
             break
 
     print(f"Average model latency {latency_ms:.1f} ms, display FPS {fps:.1f}")
+    if recorder is not None:
+        recorder.close()
     cap.release()
     cv2.destroyAllWindows()
     cv2.waitKey(1)  # [NEW] lets macOS actually close the window
@@ -810,8 +963,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("prepare", help="Split the public-dataset classes into dataset/train|val|test.")
-    p.add_argument("--val", type=float, default=0.15)
-    p.add_argument("--test", type=float, default=0.15)
+    p.add_argument("--val", type=float, default=0.2)
+    p.add_argument("--test", type=float, default=0.2)
     p.set_defaults(func=prepare_public_data)
 
     p = sub.add_parser("collect", help="Collect webcam images for one class and split.")
@@ -823,8 +976,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Start automatic capture after a short countdown (hands-free).")
     p.add_argument("--interval", type=float, default=1.2, help="Seconds between automatic captures.")
     p.add_argument("--delay", type=float, default=3.0, help="Countdown before automatic capture starts.")
+    p.add_argument("--record", action="store_true", help="Save the window to outputs/recordings/*.mp4.")
     p.set_defaults(func=lambda a: collect_data(a.class_name, a.split, a.num, a.camera,
-                                               a.auto, a.interval, a.delay))
+                                               a.auto, a.interval, a.delay, a.record))
 
     p = sub.add_parser("train", help="Train ResNet18 with transfer learning.")
     p.add_argument("--epochs", type=int, default=15)
@@ -847,8 +1001,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--threshold", type=float, default=0.70)
     p.add_argument("--smooth", type=int, default=5, help="Number of frames to average.")
+    p.add_argument("--min-change", type=float, default=0.08,
+                   help="Fraction of changed pixels that counts as 'product present'.")
+    p.add_argument("--no-presence", action="store_true",
+                   help="Disable the empty-box check and always classify.")
     p.add_argument("--device", choices=DEVICE_CHOICES, default="auto",
                    help="auto picks CUDA, then Apple MPS, then CPU.")
+    p.add_argument("--record", action="store_true", help="Save the window to outputs/recordings/*.mp4.")
     p.set_defaults(func=realtime)
 
     p = sub.add_parser("train-yolo", help="Bonus: train YOLOv8n-cls on the same dataset.")

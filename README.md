@@ -3,7 +3,7 @@
 COSC-4117EL-01 Artificial Intelligence, Fall 2026, Assignment 3, Group 6
 (Qingdong Wu, Yuhang Zhao)
 
-This project classifies six retail products in real time from a webcam feed. It uses ResNet18 transfer learning and is built on the course sample code (`CNN_ResNet_Sample.py`). For the bonus part, it also compares ResNet18 against YOLOv8n-cls.
+This project classifies six retail products, an umbrella and a reusable water bottle in real time from a webcam feed. It uses ResNet18 transfer learning and is built on the course sample code (`CNN_ResNet_Sample.py`). For the bonus part, it also compares ResNet18 against YOLOv8n-cls.
 
 ## Product classes
 
@@ -16,7 +16,9 @@ Classes are listed in alphabetical order, which is the order the model uses:
 | 2 | `juice` | `JUICE` |
 | 3 | `milk` | `MILK` |
 | 4 | `soda` | `SODA` |
-| 5 | `water` | `WATER` |
+| 5 | `umbrella` | not in Freiburg: webcam images only |
+| 6 | `water` | `WATER` (bottled mineral water) |
+| 7 | `water_bottle` | not in Freiburg: webcam images only (reusable drinking-water bottle) |
 
 ## Files
 
@@ -61,7 +63,21 @@ python COSC_4117EL_A3_G6-main.py prepare --val 0.2 --test 0.2
 
 Rerunning `prepare` is safe: copies of the public images from an earlier run are removed first, and webcam images are kept. The copied files are named `freiburg_*`. The exact split is saved in `outputs/public_data_split.csv`.
 
-### Optional: add webcam images
+### Collect the webcam-only classes (required)
+
+`umbrella` and `water_bottle` have no public images, so all of their images are taken with the webcam. Use the same 18 / 6 / 6 counts as the other classes:
+
+```bash
+for c in umbrella water_bottle; do
+  python COSC_4117EL_A3_G6-main.py collect --class-name $c --split train --num 18 --auto --interval 2 --delay 5
+  python COSC_4117EL_A3_G6-main.py collect --class-name $c --split val   --num 6  --auto --interval 2 --delay 5
+  python COSC_4117EL_A3_G6-main.py collect --class-name $c --split test  --num 6  --auto --interval 2 --delay 5
+done
+```
+
+`train` stops with a clear message if any class has no images in a split.
+
+### Optional: add webcam images to the other classes
 
 Webcam images narrow the gap between the dataset photos and the live demo:
 

@@ -5,3 +5,4 @@ dataset/
 outputs/
 *.tar.gz
 .venv/
+*.pt

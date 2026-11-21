@@ -8,7 +8,7 @@ Environment and folder setup. Run this file once before COSC_4117EL_A3_G6-main.p
     python COSC_4117EL_A3_G6-setup.py --skip-yolo   # skip the bonus YOLO package
 
 [NEW] The course sample created data/class1..class3 at start-up. This script
-creates dataset/<split>/<class>/ for the six products and the three data
+creates dataset/<split>/<class>/ for the eight classes and the three data
 splits (train / val / test) so evaluation uses images never seen in training.
 
 Generative AI acknowledgement: drafted with Doubao and revised with Claude
@@ -26,7 +26,7 @@ DATA_DIR = PROJECT_ROOT / "dataset"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 # Must match CLASS_NAMES in COSC_4117EL_A3_G6-main.py (alphabetical order).
-CLASS_NAMES = ["cereal", "chips", "juice", "milk", "soda", "water"]
+CLASS_NAMES = ["cereal", "chips", "juice", "milk", "soda", "umbrella", "water", "water_bottle"]
 SPLITS = ["train", "val", "test"]
 
 CORE_PACKAGES = ["torch", "torchvision", "opencv-python", "numpy", "pillow", "matplotlib"]
