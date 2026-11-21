@@ -16,10 +16,14 @@ Provenance tags used in the comments below:
     [NEW]       added by Group 6 for this project
 
 Generative AI acknowledgement: the initial code structure was drafted with
-Doubao. This version was revised with Claude (Anthropic) to align it with the
-course sample, fix the class-order and region-of-interest issues, and add the
-evaluation, smoothing and YOLO comparison code. All generated code was reviewed
-and tested by the group, and this use is also acknowledged in the report.
+Doubao. Claude (Anthropic) was then used to rebuild the code on top of the
+course sample (fixing the class-order and region-of-interest issues) and to
+write the data preparation (prepare), hands-free collection (--auto), training
+and evaluation code (metrics, confusion matrix, latency), the real-time
+adaptations (empty-box check, smoothing, Unknown threshold), the --device,
+screenshot and --record options, and the YOLO comparison. All generated code
+was reviewed and tested by the group; this use is also acknowledged in the
+report.
 
 Data: the public Freiburg Groceries Dataset (Jund et al., 2016,
 arXiv:1611.05799). Six of its 25 classes are used (cereal, chips, juice, milk,
